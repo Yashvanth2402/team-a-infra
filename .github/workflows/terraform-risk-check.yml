@@ -10,6 +10,11 @@ jobs:
   terraform-risk:
     runs-on: ubuntu-latest
 
+    permissions:
+      id-token: write     # REQUIRED for OIDC
+      contents: read
+      pull-requests: read
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,23 +24,31 @@ jobs:
         with:
           terraform_version: 1.6.0
 
+      # 🔐 Azure OIDC Login (MUST be before terraform init)
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Terraform Init
-        working-directory: environments/dev
+        working-directory: environments/prod
         run: terraform init -input=false
 
       - name: Terraform Plan
-        working-directory: environments/dev
+        working-directory: environments/prod
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
       - name: Generate checksum
-        working-directory: environments/dev
+        working-directory: environments/prod
         run: |
           sha256sum plan.json | awk '{print $1}' > checksum.txt
 
       - name: Build AI payload
-        working-directory: environments/dev
+        working-directory: environments/prod
         run: |
           jq -n \
             --arg pr "${{ github.event.pull_request.number }}" \
@@ -43,7 +56,7 @@ jobs:
             --arg branch "${{ github.head_ref }}" \
             --arg sha "${{ github.sha }}" \
             --arg actor "${{ github.actor }}" \
-            --arg env "dev" \
+            --arg env "prod" \
             --arg cloud "azure" \
             --arg region "eastus" \
             --slurpfile plan plan.json \
