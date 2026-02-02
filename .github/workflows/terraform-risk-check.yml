@@ -7,7 +7,7 @@ on:
       - "**/*.tf"
 
 jobs:
-  risk-analysis:
+  terraform-risk:
     runs-on: ubuntu-latest
 
     steps:
@@ -20,18 +20,22 @@ jobs:
           terraform_version: 1.6.0
 
       - name: Terraform Init
+        working-directory: environments/prod
         run: terraform init -input=false
 
       - name: Terraform Plan
+        working-directory: environments/prod
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
       - name: Generate checksum
+        working-directory: environments/prod
         run: |
           sha256sum plan.json | awk '{print $1}' > checksum.txt
 
       - name: Build AI payload
+        working-directory: environments/prod
         run: |
           jq -n \
             --arg pr "${{ github.event.pull_request.number }}" \
@@ -64,7 +68,7 @@ jobs:
 
       - name: Send to AI Risk Engine
         env:
-          AI_ENDPOINT: https://ai-risk.yourcompany.com/run
+          AI_ENDPOINT: https://ai-risk-investigator.happysand-50cce658.eastus.azurecontainerapps.io/run
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           curl -s -X POST "$AI_ENDPOINT" \
