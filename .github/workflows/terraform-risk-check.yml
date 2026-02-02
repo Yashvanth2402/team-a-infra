@@ -1,0 +1,35 @@
+name: Terraform Risk Check
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+
+jobs:
+  terraform-risk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: |
+          terraform plan -out=tfplan
+          terraform show -json tfplan > plan.json
+
+      - name: Upload plan to AI Risk Engine
+        env:
+          AI_ENDPOINT: https://your-ai-service/run
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -X POST $AI_ENDPOINT \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @plan.json
