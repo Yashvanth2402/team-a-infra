@@ -2,75 +2,51 @@ name: Terraform AI Risk Check
 
 on:
   pull_request:
-    branches:
-      - main
-      - develop
+    types: [opened, synchronize, reopened]
     paths:
       - "**/*.tf"
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
-  terraform-ai-risk:
-    name: Terraform AI Risk Review
+  risk-analysis:
     runs-on: ubuntu-latest
 
-    env:
-      TF_IN_AUTOMATION: true
-      ENVIRONMENT: prod              # dev | test | prod
-      CLOUD_PROVIDER: azure          # aws | azure | gcp
-      REGION: eastus
-      AI_ENDPOINT: https://ai-risk.yourcompany.com/run
-
     steps:
-      # -----------------------------
-      # 1. Checkout PR code
-      # -----------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # 2. Setup Terraform
-      # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -----------------------------
-      # 3. Terraform Init
-      # -----------------------------
       - name: Terraform Init
         run: terraform init -input=false
 
-      # -----------------------------
-      # 4. Terraform Plan
-      # -----------------------------
       - name: Terraform Plan
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
-      # -----------------------------
-      # 5. Build AI Payload
-      # -----------------------------
-      - name: Build AI Risk Payload
+      - name: Generate checksum
+        run: |
+          sha256sum plan.json | awk '{print $1}' > checksum.txt
+
+      - name: Build AI payload
         run: |
           jq -n \
-            --arg pr_id "${{ github.event.pull_request.number }}" \
+            --arg pr "${{ github.event.pull_request.number }}" \
             --arg repo "${{ github.repository }}" \
             --arg branch "${{ github.head_ref }}" \
             --arg sha "${{ github.sha }}" \
             --arg actor "${{ github.actor }}" \
-            --arg env "${ENVIRONMENT}" \
-            --arg cloud "${CLOUD_PROVIDER}" \
-            --arg region "${REGION}" \
+            --arg env "prod" \
+            --arg cloud "azure" \
+            --arg region "eastus" \
             --slurpfile plan plan.json \
+            --rawfile checksum checksum.txt \
             '{
               metadata: {
-                pr_id: $pr_id,
+                pr_id: $pr,
                 repo: $repo,
                 branch: $branch,
                 commit_sha: $sha,
@@ -82,42 +58,16 @@ jobs:
                 cloud: $cloud,
                 region: $region
               },
-              terraform_plan: $plan[0]
+              terraform_plan: $plan[0],
+              checksum: $checksum
             }' > payload.json
 
-      # -----------------------------
-      # 6. Call Central AI Risk Engine
-      # -----------------------------
-      - name: Call AI Risk Investigator
-        id: ai-risk
+      - name: Send to AI Risk Engine
         env:
+          AI_ENDPOINT: https://ai-risk.yourcompany.com/run
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           curl -s -X POST "$AI_ENDPOINT" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
-            -d @payload.json \
-            -o ai-response.json
-
-      # -----------------------------
-      # 7. Print AI Decision (logs)
-      # -----------------------------
-      - name: Show AI Risk Result
-        run: |
-          echo "===== AI RISK RESPONSE ====="
-          cat ai-response.json
-          echo "============================"
-
-      # -----------------------------
-      # 8. (Optional – later) Fail PR if BLOCKED
-      # -----------------------------
-      - name: Enforce AI Decision
-        run: |
-          DECISION=$(jq -r '.decision.action' ai-response.json)
-
-          echo "AI Decision: $DECISION"
-
-          if [ "$DECISION" = "BLOCK" ]; then
-            echo "❌ PR blocked by AI Risk Investigator"
-            exit 1
-          fi
+            -d @payload.json
