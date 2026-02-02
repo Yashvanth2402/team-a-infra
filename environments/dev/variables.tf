@@ -13,6 +13,11 @@ variable "subscription_id" {
   type        = string
 }
 
+variable "tenant_id" {
+  description = "Azure tenant ID"
+  type        = string
+}
+
 variable "tags" {
   description = "Common tags"
   type        = map(string)
