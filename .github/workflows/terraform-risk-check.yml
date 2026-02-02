@@ -3,20 +3,29 @@ name: Terraform AI Risk Check
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    branches:
+      - main
     paths:
-      - "**/*.tf"
+      - "modules/**"
+      - "environments/**"
+      - "globals/**"
+      - "bootstrap/**"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
 
 jobs:
   terraform-risk:
     runs-on: ubuntu-latest
 
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: read
+    defaults:
+      run:
+        shell: bash
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Terraform
@@ -24,7 +33,7 @@ jobs:
         with:
           terraform_version: 1.6.0
 
-      # 🔐 Azure OIDC Login
+      # 🔐 Azure OIDC Login (Service Principal, no secrets)
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -34,10 +43,16 @@ jobs:
 
       - name: Terraform Init
         working-directory: environments/dev
+        env:
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
       - name: Terraform Plan
         working-directory: environments/dev
+        env:
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
@@ -47,7 +62,7 @@ jobs:
         run: |
           sha256sum plan.json | awk '{print $1}' > checksum.txt
 
-      - name: Build AI payload
+      - name: Build AI Risk Payload
         working-directory: environments/dev
         run: |
           jq -n \
@@ -81,7 +96,7 @@ jobs:
 
       - name: Send to AI Risk Engine
         env:
-          AI_ENDPOINT: https://ai-risk-investigator.happysand-50cce658.eastus.azurecontainerapps.io/run
+          AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           curl -s -X POST "$AI_ENDPOINT" \
