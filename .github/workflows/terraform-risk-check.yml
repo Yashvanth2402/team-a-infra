@@ -1,11 +1,10 @@
-name: Terraform AI Risk Check
+name: Terraform AI Risk Check (Dev)
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
-      - "environments/**.tf"
-      - "environments/**.tfvars"
+      - "environments/dev/**"
 
 permissions:
   contents: read
@@ -17,50 +16,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # REQUIRED to detect changed files
 
-      - name: Detect environment from changed files
-        id: detect-env
-        run: |
-          echo "Detecting environment from PR changes..."
-
-          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
-
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-
-          ENVIRONMENTS=$(echo "$CHANGED_FILES" \
-            | grep '^environments/' \
-            | awk -F'/' '{print $2}' \
-            | sort -u)
-
-          ENV_COUNT=$(echo "$ENVIRONMENTS" | wc -l)
-
-          if [ "$ENV_COUNT" -eq 0 ]; then
-            echo "❌ No environment changes detected"
-            exit 1
-          fi
-
-          if [ "$ENV_COUNT" -gt 1 ]; then
-            echo "❌ Multiple environments modified:"
-            echo "$ENVIRONMENTS"
-            echo "🚨 One PR must target only ONE environment"
-            exit 1
-          fi
-
-          ENV=$(echo "$ENVIRONMENTS")
-          echo "✅ Detected environment: $ENV"
-
-          echo "env=$ENV" >> $GITHUB_OUTPUT
-
+      # -------------------------------
+      # Terraform setup
+      # -------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
+      # -------------------------------
+      # Azure authentication (OIDC)
+      # -------------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -68,22 +37,29 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # -------------------------------
+      # Terraform init & plan (DEV)
+      # -------------------------------
       - name: Terraform Init
+        working-directory: environments/dev
         run: terraform init -input=false
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
       - name: Terraform Plan
+        working-directory: environments/dev
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
       - name: Generate plan checksum
+        working-directory: environments/dev
         run: |
           sha256sum plan.json | awk '{print $1}' > checksum.txt
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
+      # -------------------------------
+      # Build AI payload
+      # -------------------------------
       - name: Build AI payload
+        working-directory: environments/dev
         run: |
           jq -n \
             --arg pr "${{ github.event.pull_request.number }}" \
@@ -91,7 +67,7 @@ jobs:
             --arg branch "${{ github.head_ref }}" \
             --arg sha "${{ github.sha }}" \
             --arg actor "${{ github.actor }}" \
-            --arg env "${{ steps.detect-env.outputs.env }}" \
+            --arg env "dev" \
             --arg cloud "azure" \
             --slurpfile plan plan.json \
             --rawfile checksum checksum.txt \
@@ -111,23 +87,32 @@ jobs:
               terraform_plan: $plan[0],
               checksum: $checksum
             }' > payload.json
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
+      # -------------------------------
+      # Call AI Risk Engine
+      # -------------------------------
       - name: Call AI Risk Engine
+        working-directory: environments/dev
+        env:
+          AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
+          API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
-          AI_ENDPOINT_CLEAN="$(echo -n "${{ secrets.AI_RISK_ENDPOINT }}")"
+          AI_ENDPOINT_CLEAN="$(echo -n "$AI_ENDPOINT")"
 
           curl -s -X POST "$AI_ENDPOINT_CLEAN" \
             -H "Content-Type: application/json" \
-            -H "x-api-key: ${{ secrets.AI_RISK_API_KEY }}" \
+            -H "x-api-key: $API_KEY" \
             -d @payload.json \
             > ai_response.json
 
           echo "AI response:"
           cat ai_response.json
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
+      # -------------------------------
+      # Build PR comment
+      # -------------------------------
       - name: Build PR comment
+        working-directory: environments/dev
         run: |
           RISK_LEVEL=$(jq -r '.risk_level' ai_response.json)
           DECISION=$(jq -r '.decision' ai_response.json)
@@ -137,7 +122,7 @@ jobs:
           cat <<EOF > pr_comment.md
 ## 🤖 Autonomous Cloud Change Risk Investigator
 
-**Environment:** ${{ steps.detect-env.outputs.env }}  
+**Environment:** dev  
 **Risk Level:** $RISK_LEVEL  
 **Decision:** $DECISION  
 **Confidence:** $CONFIDENCE  
@@ -146,14 +131,16 @@ jobs:
 $EXPLANATION
 
 ---
-*Generated automatically by the AI Risk Platform*
+*This comment was generated automatically by the AI Risk Platform.*
 EOF
-        working-directory: environments/${{ steps.detect-env.outputs.env }}
 
+      # -------------------------------
+      # Post comment to Terraform PR
+      # -------------------------------
       - name: Post AI comment on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh api \
             repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            -f body="$(cat environments/${{ steps.detect-env.outputs.env }}/pr_comment.md)"
+            -f body="$(cat environments/dev/pr_comment.md)"
