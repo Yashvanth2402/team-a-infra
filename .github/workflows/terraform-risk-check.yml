@@ -1,35 +1,34 @@
-name: Terraform AI Risk Check (Dev)
+name: Terraform AI Risk Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    branches:
+      - main
     paths:
-      - "environments/dev/**"
+      - "modules/**"
+      - "environments/**"
+      - "globals/**"
+      - "bootstrap/**"
 
 permissions:
-  contents: read
-  pull-requests: write
   id-token: write
+  contents: read
+  pull-requests: read
 
 jobs:
   terraform-risk:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # -------------------------------
-      # Terraform setup
-      # -------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -------------------------------
-      # Azure authentication (OIDC)
-      # -------------------------------
+      # 🔐 Azure Login via OIDC (Service Principal)
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -37,28 +36,37 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # -------------------------------
-      # Terraform init & plan (DEV)
-      # -------------------------------
+      # 🚨 BACKEND AUTH FIX (THIS IS THE KEY)
       - name: Terraform Init
         working-directory: environments/dev
+        env:
+          ARM_USE_OIDC: true
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
       - name: Terraform Plan
         working-directory: environments/dev
+        env:
+          ARM_USE_OIDC: true
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
-
-      - name: Generate plan checksum
+      - name: Generate checksum
         working-directory: environments/dev
         run: |
           sha256sum plan.json | awk '{print $1}' > checksum.txt
-
-      # -------------------------------
-      # Build AI payload
-      # -------------------------------
-      - name: Build AI payload
+      - name: Build AI Risk Payload
         working-directory: environments/dev
         run: |
           jq -n \
@@ -69,6 +77,7 @@ jobs:
             --arg actor "${{ github.actor }}" \
             --arg env "dev" \
             --arg cloud "azure" \
+            --arg region "eastus" \
             --slurpfile plan plan.json \
             --rawfile checksum checksum.txt \
             '{
@@ -82,65 +91,28 @@ jobs:
               },
               environment: {
                 name: $env,
-                cloud: $cloud
+                cloud: $cloud,
+                region: $region
               },
               terraform_plan: $plan[0],
               checksum: $checksum
             }' > payload.json
-
-      # -------------------------------
-      # Call AI Risk Engine
-      # -------------------------------
-      - name: Call AI Risk Engine
+      # 🔍 DEBUG STEP (TEMP – DO NOT SKIP)
+      - name: Debug AI endpoint (TEMP – DO NOT SKIP)
+        working-directory: environments/dev
+        env:
+          AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
+        run: |
+          echo "Length: ${#AI_ENDPOINT}"
+          echo "Raw value:"
+          printf '%q\n' "$AI_ENDPOINT"
+      - name: Send to AI Risk Engine
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
-          AI_ENDPOINT_CLEAN="$(echo -n "$AI_ENDPOINT")"
-
-          curl -s -X POST "$AI_ENDPOINT_CLEAN" \
+          curl -s -X POST "$AI_ENDPOINT" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
-            -d @payload.json \
-            > ai_response.json
-
-          echo "AI response:"
-          cat ai_response.json
-
-      # -------------------------------
-      # Build PR comment
-      # -------------------------------
-      - name: Build PR comment
-        working-directory: environments/dev
-        run: |
-          RISK_LEVEL=$(jq -r '.risk_level' ai_response.json)
-          DECISION=$(jq -r '.decision' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation' ai_response.json)
-
-          cat <<EOF > pr_comment.md
-## 🤖 Autonomous Cloud Change Risk Investigator
-
-**Environment:** dev  
-**Risk Level:** $RISK_LEVEL  
-**Decision:** $DECISION  
-**Confidence:** $CONFIDENCE  
-
-### 🧠 AI Explanation
-$EXPLANATION
-
----
-*This comment was generated automatically by the AI Risk Platform.*
-EOF
-
-      # -------------------------------
-      # Post comment to Terraform PR
-      # -------------------------------
-      - name: Post AI comment on PR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api \
-            repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            -f body="$(cat environments/dev/pr_comment.md)"
+            -d @payload.json
