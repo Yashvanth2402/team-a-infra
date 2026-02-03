@@ -101,6 +101,7 @@ jobs:
             }' > payload.json
 
       - name: Send to AI Risk Engine
+        working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
