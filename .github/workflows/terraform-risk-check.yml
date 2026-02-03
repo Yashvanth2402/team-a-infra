@@ -100,6 +100,16 @@ jobs:
               checksum: $checksum
             }' > payload.json
 
+      # 🔍 DEBUG STEP (TEMP – DO NOT SKIP)
+      - name: Debug AI endpoint (TEMP – DO NOT SKIP)
+        working-directory: environments/dev
+        env:
+          AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
+        run: |
+          echo "Length: ${#AI_ENDPOINT}"
+          echo "Raw value:"
+          printf '%q\n' "$AI_ENDPOINT"
+
       - name: Send to AI Risk Engine
         working-directory: environments/dev
         env:
