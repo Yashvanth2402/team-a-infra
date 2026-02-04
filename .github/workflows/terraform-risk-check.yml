@@ -28,14 +28,13 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------
-      # Allow only dev / dev1 branches
+      # Allow only dev / dev1 source branches
       # -----------------------------------
       - name: Validate source branch
         run: |
           echo "Source branch: ${{ github.head_ref }}"
-
           if [[ "${{ github.head_ref }}" != "dev" && "${{ github.head_ref }}" != "dev1" ]]; then
-            echo "❌ Branch '${{ github.head_ref }}' is not allowed to run Terraform risk checks"
+            echo "❌ Branch '${{ github.head_ref }}' is not allowed"
             exit 1
           fi
 
@@ -131,7 +130,7 @@ jobs:
             }' > payload.json
 
       # -----------------------------------
-      # Call AI Risk Engine
+      # Call AI Risk Engine (never fail here)
       # -----------------------------------
       - name: Send to AI Risk Engine
         working-directory: environments/dev
@@ -145,34 +144,38 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.json
+            > ai_response.json || true
 
-          echo "AI response:"
-          cat ai_response.json
+          echo "AI raw response:"
+          cat ai_response.json || true
 
       # -----------------------------------
-      # Validate AI Response + Build PR Comment
+      # Build PR Comment (robust, timeout-safe)
       # -----------------------------------
-      - name: Validate and Build PR Comment
+      - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          if ! jq empty ai_response.json >/dev/null 2>&1; then
-            echo "❌ AI response is not valid JSON"
-            cat ai_response.json
-            exit 1
+          if jq empty ai_response.json >/dev/null 2>&1; then
+            RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
+            DECISION=$(jq -r '.decision // "UNKNOWN"' ai_response.json)
+            CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
+            EXPLANATION=$(jq -r '.explanation // "No explanation provided"' ai_response.json)
+
+            printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
+            printf "**Environment:** dev\n" >> pr_comment.md
+            printf "**Risk Level:** %s\n" "$RISK_LEVEL" >> pr_comment.md
+            printf "**Decision:** %s\n" "$DECISION" >> pr_comment.md
+            printf "**Confidence:** %s\n\n" "$CONFIDENCE" >> pr_comment.md
+            printf "### 🧠 AI Explanation\n%s\n\n" "$EXPLANATION" >> pr_comment.md
+          else
+            printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
+            printf "**Environment:** dev\n" >> pr_comment.md
+            printf "**Status:** ⚠️ AI evaluation failed\n\n" >> pr_comment.md
+            printf "### Raw AI Response\n```\n" >> pr_comment.md
+            cat ai_response.json >> pr_comment.md
+            printf "\n```\n\n" >> pr_comment.md
           fi
 
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
-          DECISION=$(jq -r '.decision // "UNKNOWN"' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation // "No explanation provided"' ai_response.json)
-
-          printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
-          printf "**Environment:** dev\n" >> pr_comment.md
-          printf "**Risk Level:** %s\n" "$RISK_LEVEL" >> pr_comment.md
-          printf "**Decision:** %s\n" "$DECISION" >> pr_comment.md
-          printf "**Confidence:** %s\n\n" "$CONFIDENCE" >> pr_comment.md
-          printf "### 🧠 AI Explanation\n%s\n\n" "$EXPLANATION" >> pr_comment.md
           printf "---\n*Generated automatically by the AI Risk Platform*\n" >> pr_comment.md
 
       # -----------------------------------
