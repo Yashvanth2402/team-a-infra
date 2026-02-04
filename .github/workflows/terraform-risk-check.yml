@@ -21,34 +21,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------------
+      # -----------------------------
       # Checkout
-      # -----------------------------------
+      # -----------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------------
-      # Allow only dev / dev1 source branches
-      # -----------------------------------
-      - name: Validate source branch
-        run: |
-          echo "Source branch: ${{ github.head_ref }}"
-          if [[ "${{ github.head_ref }}" != "dev" && "${{ github.head_ref }}" != "dev1" ]]; then
-            echo "❌ Branch '${{ github.head_ref }}' is not allowed"
-            exit 1
-          fi
-
-      # -----------------------------------
+      # -----------------------------
       # Setup Terraform
-      # -----------------------------------
+      # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -----------------------------------
+      # -----------------------------
       # Azure Login (OIDC)
-      # -----------------------------------
+      # -----------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -56,9 +45,9 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # -----------------------------------
+      # -----------------------------
       # Terraform Init
-      # -----------------------------------
+      # -----------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
@@ -70,9 +59,9 @@ jobs:
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
-      # -----------------------------------
+      # -----------------------------
       # Terraform Plan
-      # -----------------------------------
+      # -----------------------------
       - name: Terraform Plan
         working-directory: environments/dev
         env:
@@ -86,17 +75,18 @@ jobs:
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
-      # -----------------------------------
-      # Generate checksum
-      # -----------------------------------
+      # -----------------------------
+      # Generate checksum (CANONICAL)
+      # -----------------------------
       - name: Generate checksum
         working-directory: environments/dev
         run: |
-          sha256sum plan.json | awk '{print $1}' > checksum.txt
+          jq -cS . plan.json > plan.canonical.json
+          sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
 
-      # -----------------------------------
+      # -----------------------------
       # Build AI Payload
-      # -----------------------------------
+      # -----------------------------
       - name: Build AI Risk Payload
         working-directory: environments/dev
         run: |
@@ -109,7 +99,7 @@ jobs:
             --arg env "dev" \
             --arg cloud "azure" \
             --arg region "eastus" \
-            --slurpfile plan plan.json \
+            --slurpfile plan plan.canonical.json \
             --rawfile checksum checksum.txt \
             '{
               metadata: {
@@ -129,9 +119,9 @@ jobs:
               checksum: $checksum
             }' > payload.json
 
-      # -----------------------------------
-      # Call AI Risk Engine (never fail)
-      # -----------------------------------
+      # -----------------------------
+      # Call AI Risk Engine
+      # -----------------------------
       - name: Send to AI Risk Engine
         working-directory: environments/dev
         env:
@@ -139,47 +129,37 @@ jobs:
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           AI_ENDPOINT_CLEAN="$(printf '%s' "$AI_ENDPOINT")"
+
           curl -s -X POST "$AI_ENDPOINT_CLEAN" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.json || true
+            > ai_response.json
 
-          echo "AI raw response:"
-          cat ai_response.json || true
+          cat ai_response.json
 
-      # -----------------------------------
-      # ✅ UPDATED: Build PR Comment (robust & safe)
-      # -----------------------------------
+      # -----------------------------
+      # Build PR Comment
+      # -----------------------------
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          if jq empty ai_response.json >/dev/null 2>&1; then
-            RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
-            DECISION=$(jq -r '.decision // "UNKNOWN"' ai_response.json)
-            CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
-            EXPLANATION=$(jq -r '.explanation // "No explanation provided"' ai_response.json)
+          RISK_LEVEL=$(jq -r '.risk_level' ai_response.json)
+          DECISION=$(jq -r '.decision' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation' ai_response.json)
 
-            printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
-            printf "**Environment:** dev\n" >> pr_comment.md
-            printf "**Risk Level:** %s\n" "$RISK_LEVEL" >> pr_comment.md
-            printf "**Decision:** %s\n" "$DECISION" >> pr_comment.md
-            printf "**Confidence:** %s\n\n" "$CONFIDENCE" >> pr_comment.md
-            printf "### 🧠 AI Explanation\n%s\n\n" "$EXPLANATION" >> pr_comment.md
-          else
-            printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
-            printf "**Environment:** dev\n" >> pr_comment.md
-            printf "**Status:** ⚠️ AI evaluation failed\n\n" >> pr_comment.md
-            printf "### Raw AI Response\n```\n" >> pr_comment.md
-            cat ai_response.json >> pr_comment.md
-            printf "\n```\n\n" >> pr_comment.md
-          fi
-
+          printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
+          printf "**Environment:** dev\n" >> pr_comment.md
+          printf "**Risk Level:** %s\n" "$RISK_LEVEL" >> pr_comment.md
+          printf "**Decision:** %s\n" "$DECISION" >> pr_comment.md
+          printf "**Confidence:** %s\n\n" "$CONFIDENCE" >> pr_comment.md
+          printf "### 🧠 AI Explanation\n%s\n\n" "$EXPLANATION" >> pr_comment.md
           printf -- "---\n*Generated automatically by the AI Risk Platform*\n" >> pr_comment.md
 
-      # -----------------------------------
+      # -----------------------------
       # Post PR Comment
-      # -----------------------------------
+      # -----------------------------
       - name: Post AI Comment on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
