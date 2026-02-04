@@ -57,7 +57,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # -----------------------------------
-      # Terraform Init (Backend Auth Fix)
+      # Terraform Init
       # -----------------------------------
       - name: Terraform Init
         working-directory: environments/dev
@@ -130,7 +130,7 @@ jobs:
             }' > payload.json
 
       # -----------------------------------
-      # Call AI Risk Engine (never fail here)
+      # Call AI Risk Engine (never fail)
       # -----------------------------------
       - name: Send to AI Risk Engine
         working-directory: environments/dev
@@ -139,7 +139,6 @@ jobs:
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           AI_ENDPOINT_CLEAN="$(printf '%s' "$AI_ENDPOINT")"
-
           curl -s -X POST "$AI_ENDPOINT_CLEAN" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
@@ -150,7 +149,7 @@ jobs:
           cat ai_response.json || true
 
       # -----------------------------------
-      # Build PR Comment (robust, timeout-safe)
+      # ✅ UPDATED: Build PR Comment (robust & safe)
       # -----------------------------------
       - name: Build PR Comment
         working-directory: environments/dev
@@ -176,7 +175,7 @@ jobs:
             printf "\n```\n\n" >> pr_comment.md
           fi
 
-          printf "---\n*Generated automatically by the AI Risk Platform*\n" >> pr_comment.md
+          printf -- "---\n*Generated automatically by the AI Risk Platform*\n" >> pr_comment.md
 
       # -----------------------------------
       # Post PR Comment
