@@ -2,9 +2,7 @@ name: Terraform AI Risk Check
 
 on:
   pull_request:
-    branches:
-      - main
-      - dev1
+    branches: [ main, dev1 ]
     paths:
       - "modules/**"
       - "environments/**"
@@ -12,7 +10,7 @@ on:
       - "bootstrap/**"
 
 permissions:
-  id-token: write        # 🔐 REQUIRED for GitHub OIDC
+  id-token: write
   contents: read
   pull-requests: write
 
@@ -21,23 +19,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------
-      # Checkout
-      # -----------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # Setup Terraform
-      # -----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -----------------------------
-      # Azure Login (OIDC)
-      # -----------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -45,9 +34,6 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # -----------------------------
-      # Terraform Init
-      # -----------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
@@ -55,126 +41,78 @@ jobs:
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
-      # -----------------------------
-      # Terraform Plan
-      # -----------------------------
       - name: Terraform Plan
         working-directory: environments/dev
-        env:
-          ARM_USE_OIDC: true
-          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: |
-          terraform plan -out=tfplan -input=false
+          terraform plan -out=tfplan
           terraform show -json tfplan > plan.json
 
-      # -----------------------------
-      # Canonicalize & checksum plan
-      # -----------------------------
-      - name: Generate checksum
-        working-directory: environments/dev
-        run: |
-          jq -cS . plan.json > plan.canonical.json
-          sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
-
-      # -----------------------------
-      # Build AI Payload
-      # -----------------------------
-      - name: Build AI Risk Payload
+      - name: Build AI Payload
         working-directory: environments/dev
         run: |
           jq -n \
-            --arg pr "${{ github.event.pull_request.number }}" \
-            --arg repo "${{ github.repository }}" \
-            --arg branch "${{ github.head_ref }}" \
-            --arg sha "${{ github.sha }}" \
-            --arg actor "${{ github.actor }}" \
             --arg env "dev" \
             --arg cloud "azure" \
-            --arg region "eastus" \
-            --slurpfile plan plan.canonical.json \
-            --rawfile checksum checksum.txt \
+            --slurpfile plan plan.json \
             '{
-              metadata: {
-                pr_id: $pr,
-                repo: $repo,
-                branch: $branch,
-                commit_sha: $sha,
-                ci_system: "github-actions",
-                triggered_by: $actor
-              },
               environment: {
                 name: $env,
-                cloud: $cloud,
-                region: $region
+                cloud: $cloud
               },
-              terraform_plan: $plan[0],
-              checksum: $checksum
+              terraform_plan: $plan[0]
             }' > payload.json
 
-      # -----------------------------
-      # Call AI Risk Engine (OIDC)
-      # -----------------------------
-      - name: Call AI Risk Engine
+      - name: Call AI Platform using GitHub OIDC
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
         run: |
-          echo "Calling AI platform with GitHub OIDC identity..."
+          echo "Requesting GitHub OIDC token"
 
-          curl --fail --silent --show-error \
-            -X POST "$AI_ENDPOINT" \
+          ID_TOKEN=$(curl -s \
             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r '.value')
+
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+            echo "Failed to get OIDC token"
+            exit 1
+          fi
+
+          curl --fail -s \
+            -H "Authorization: Bearer $ID_TOKEN" \
             -H "Content-Type: application/json" \
+            -X POST "$AI_ENDPOINT" \
             -d @payload.json \
             -o ai_response.json
 
-          echo "Raw AI response:"
           cat ai_response.json
 
-          jq empty ai_response.json
-
-      # -----------------------------
-      # Build PR Comment
-      # -----------------------------
-      - name: Build PR Comment
-        working-directory: environments/dev
+      - name: Post PR Comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
-          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
+          RISK=$(jq -r '.risk_level' ai_response.json)
+          DECISION=$(jq -r '.decision' ai_response.json)
+          CONF=$(jq -r '.confidence' ai_response.json)
+          EXPL=$(jq -r '.explanation' ai_response.json)
 
-          cat <<EOF > pr_comment.md
+          cat <<EOF > comment.md
           ## 🤖 Autonomous Cloud Change Risk Investigator
 
           **Environment:** dev  
-          **Risk Level:** $RISK_LEVEL  
+          **Risk Level:** $RISK  
           **Decision:** $DECISION  
-          **Confidence:** $CONFIDENCE  
+          **Confidence:** $CONF  
 
           ### 🧠 AI Explanation
-          $EXPLANATION
+          $EXPL
 
           ---
           *Generated automatically by the AI Risk Platform*
           EOF
 
-      # -----------------------------
-      # Post PR Comment
-      # -----------------------------
-      - name: Post AI Comment on PR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api \
-            repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
-            -f body="$(cat environments/dev/pr_comment.md)"
+          gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            -f body="$(cat comment.md)"
