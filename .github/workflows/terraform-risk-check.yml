@@ -21,23 +21,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ------------------------------------
+      # -------------------------------------------------
       # Checkout
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ------------------------------------
+      # -------------------------------------------------
       # Setup Terraform
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # ------------------------------------
+      # -------------------------------------------------
       # Azure Login (OIDC)
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -45,9 +45,9 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # ------------------------------------
+      # -------------------------------------------------
       # Terraform Init
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
@@ -59,9 +59,9 @@ jobs:
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
-      # ------------------------------------
+      # -------------------------------------------------
       # Terraform Plan
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Terraform Plan
         working-directory: environments/dev
         env:
@@ -74,19 +74,11 @@ jobs:
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
+          jq -c . plan.json > plan.canonical.json
 
-      # ------------------------------------
-      # Canonical checksum (IMPORTANT)
-      # ------------------------------------
-      - name: Generate checksum
-        working-directory: environments/dev
-        run: |
-          jq -cS . plan.json > plan.canonical.json
-          sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
-
-      # ------------------------------------
-      # Build AI Payload
-      # ------------------------------------
+      # -------------------------------------------------
+      # Build AI Payload (CANONICAL)
+      # -------------------------------------------------
       - name: Build AI Risk Payload
         working-directory: environments/dev
         run: |
@@ -100,7 +92,6 @@ jobs:
             --arg cloud "azure" \
             --arg region "eastus" \
             --slurpfile plan plan.canonical.json \
-            --rawfile checksum checksum.txt \
             '{
               metadata: {
                 pr_id: $pr,
@@ -115,42 +106,39 @@ jobs:
                 cloud: $cloud,
                 region: $region
               },
-              terraform_plan: $plan[0],
-              checksum: $checksum
+              terraform_plan: $plan[0]
             }' > payload.json
 
-      # ------------------------------------
-      # Call AI Risk Engine (DEBUG SAFE)
-      # ------------------------------------
+      # -------------------------------------------------
+      # Call AI Risk Engine
+      # -------------------------------------------------
       - name: Call AI Risk Engine
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
-          echo "Calling AI endpoint: [$AI_ENDPOINT]"
-          echo "API key length: ${#API_KEY}"
+          AI_ENDPOINT_CLEAN="$(printf '%s' "$AI_ENDPOINT")"
 
-          curl -i -X POST "$AI_ENDPOINT" \
+          curl -s -X POST "$AI_ENDPOINT_CLEAN" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            | tee ai_response.raw
+            > ai_response.json
 
-      # ------------------------------------
-      # Build PR Comment (NULL SAFE)
-      # ------------------------------------
+          echo "AI response:"
+          cat ai_response.json
+
+      # -------------------------------------------------
+      # Build PR Comment
+      # -------------------------------------------------
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          echo "Raw AI response:"
-          cat ai_response.raw
-
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.raw)
-          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.raw)
-          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.raw)
-          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.raw)
-          VERSION=$(jq -r '._app_version // "unknown"' ai_response.raw)
+          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
+          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
 
           cat <<EOF > pr_comment.md
           ## 🤖 Autonomous Cloud Change Risk Investigator
@@ -164,13 +152,12 @@ jobs:
           $EXPLANATION
 
           ---
-          _AI Platform Version: $VERSION_  
           *Generated automatically by the AI Risk Platform*
           EOF
 
-      # ------------------------------------
+      # -------------------------------------------------
       # Post PR Comment
-      # ------------------------------------
+      # -------------------------------------------------
       - name: Post AI Comment on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
