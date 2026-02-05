@@ -21,23 +21,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -------------------------------------------------
-      # Checkout
-      # -------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -------------------------------------------------
-      # Setup Terraform
-      # -------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -------------------------------------------------
-      # Azure Login (OIDC)
-      # -------------------------------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -45,55 +36,37 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # -------------------------------------------------
-      # Terraform Init  ✅ FIXED
-      # -------------------------------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
-          # Azure authentication (OIDC)
           ARM_USE_OIDC: true
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-          # Terraform input variables (CRITICAL FIX)
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
-      # -------------------------------------------------
-      # Terraform Plan  ✅ FIXED
-      # -------------------------------------------------
       - name: Terraform Plan
         working-directory: environments/dev
         env:
-          # Azure authentication (OIDC)
           ARM_USE_OIDC: true
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-          # Terraform input variables (CRITICAL FIX)
           TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
-      # -------------------------------------------------
-      # Canonicalize + Checksum
-      # -------------------------------------------------
       - name: Generate checksum
         working-directory: environments/dev
         run: |
           jq -cS . plan.json > plan.canonical.json
           sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
 
-      # -------------------------------------------------
-      # Build AI Payload
-      # -------------------------------------------------
-      - name: Build AI Risk Payload
+      - name: Build AI Payload
         working-directory: environments/dev
         run: |
           jq -n \
@@ -125,33 +98,32 @@ jobs:
               checksum: $checksum
             }' > payload.json
 
-      # -------------------------------------------------
-      # Call AI Risk Engine
-      # -------------------------------------------------
-      - name: Send to AI Risk Engine
+      # 🔥 FIXED: clean JSON only
+      - name: Call AI Risk Engine
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
           API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
-          curl -s -X POST "$AI_ENDPOINT" \
+          curl --fail --silent --show-error \
+            -X POST "$AI_ENDPOINT" \
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.json
+            -o ai_response.json
 
+          echo "Raw AI response:"
           cat ai_response.json
 
-      # -------------------------------------------------
-      # Build PR Comment
-      # -------------------------------------------------
+          jq empty ai_response.json
+
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
-          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
+          RISK_LEVEL=$(jq -r '.risk_level' ai_response.json)
+          DECISION=$(jq -r '.decision' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation' ai_response.json)
 
           cat <<EOF > pr_comment.md
           ## 🤖 Autonomous Cloud Change Risk Investigator
@@ -168,9 +140,6 @@ jobs:
           *Generated automatically by the AI Risk Platform*
           EOF
 
-      # -------------------------------------------------
-      # Post PR Comment
-      # -------------------------------------------------
       - name: Post AI Comment on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
