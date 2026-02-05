@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-      - dev
       - dev1
     paths:
       - "modules/**"
@@ -47,33 +46,43 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # -------------------------------------------------
-      # Terraform Init (OIDC FIX)
+      # Terraform Init  ✅ FIXED
       # -------------------------------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
+          # Azure authentication (OIDC)
           ARM_USE_OIDC: true
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          # Terraform input variables (CRITICAL FIX)
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: terraform init -input=false
 
       # -------------------------------------------------
-      # Terraform Plan
+      # Terraform Plan  ✅ FIXED
       # -------------------------------------------------
       - name: Terraform Plan
         working-directory: environments/dev
         env:
+          # Azure authentication (OIDC)
           ARM_USE_OIDC: true
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+          # Terraform input variables (CRITICAL FIX)
+          TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
       # -------------------------------------------------
-      # Canonical checksum (critical for AI validation)
+      # Canonicalize + Checksum
       # -------------------------------------------------
       - name: Generate checksum
         working-directory: environments/dev
@@ -117,9 +126,9 @@ jobs:
             }' > payload.json
 
       # -------------------------------------------------
-      # Call AI Risk Engine (OIDC-secured API)
+      # Call AI Risk Engine
       # -------------------------------------------------
-      - name: Call AI Risk Engine
+      - name: Send to AI Risk Engine
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
@@ -129,21 +138,20 @@ jobs:
             -H "Content-Type: application/json" \
             -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.raw
+            > ai_response.json
 
-          echo "Raw AI response:"
-          cat ai_response.raw
+          cat ai_response.json
 
       # -------------------------------------------------
-      # Build PR Comment (NULL-SAFE)
+      # Build PR Comment
       # -------------------------------------------------
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.raw)
-          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.raw)
-          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.raw)
-          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.raw)
+          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
+          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
 
           cat <<EOF > pr_comment.md
           ## 🤖 Autonomous Cloud Change Risk Investigator
