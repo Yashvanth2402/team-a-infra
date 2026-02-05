@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - dev
       - dev1
     paths:
       - "modules/**"
@@ -12,7 +13,7 @@ on:
       - "bootstrap/**"
 
 permissions:
-  id-token: write          # 🔑 REQUIRED FOR OIDC
+  id-token: write
   contents: read
   pull-requests: write
 
@@ -21,23 +22,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------
+      # -------------------------------------------------
       # Checkout
-      # -----------------------------
+      # -------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
+      # -------------------------------------------------
       # Setup Terraform
-      # -----------------------------
+      # -------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.0
 
-      # -----------------------------
-      # Azure Login (for Terraform only)
-      # -----------------------------
+      # -------------------------------------------------
+      # Azure Login (OIDC)
+      # -------------------------------------------------
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -45,9 +46,9 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # -----------------------------
-      # Terraform Init
-      # -----------------------------
+      # -------------------------------------------------
+      # Terraform Init (OIDC FIX)
+      # -------------------------------------------------
       - name: Terraform Init
         working-directory: environments/dev
         env:
@@ -57,30 +58,33 @@ jobs:
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: terraform init -input=false
 
-      # -----------------------------
+      # -------------------------------------------------
       # Terraform Plan
-      # -----------------------------
+      # -------------------------------------------------
       - name: Terraform Plan
         working-directory: environments/dev
         env:
           ARM_USE_OIDC: true
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           terraform plan -out=tfplan -input=false
           terraform show -json tfplan > plan.json
 
-      # -----------------------------
-      # Canonical checksum
-      # -----------------------------
+      # -------------------------------------------------
+      # Canonical checksum (critical for AI validation)
+      # -------------------------------------------------
       - name: Generate checksum
         working-directory: environments/dev
         run: |
           jq -cS . plan.json > plan.canonical.json
           sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
 
-      # -----------------------------
+      # -------------------------------------------------
       # Build AI Payload
-      # -----------------------------
-      - name: Build AI Payload
+      # -------------------------------------------------
+      - name: Build AI Risk Payload
         working-directory: environments/dev
         run: |
           jq -n \
@@ -112,49 +116,34 @@ jobs:
               checksum: $checksum
             }' > payload.json
 
-      # -----------------------------
-      # Fetch GitHub OIDC token
-      # -----------------------------
-      - name: Get GitHub OIDC Token
-        id: oidc
-        run: |
-          TOKEN=$(curl -s \
-            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
-            | jq -r '.value')
-
-          echo "OIDC_TOKEN=$TOKEN" >> $GITHUB_ENV
-        env:
-          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-
-      # -----------------------------
-      # Call AI Risk Platform
-      # -----------------------------
-      - name: Send to AI Risk Engine
+      # -------------------------------------------------
+      # Call AI Risk Engine (OIDC-secured API)
+      # -------------------------------------------------
+      - name: Call AI Risk Engine
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
+          API_KEY: ${{ secrets.AI_RISK_API_KEY }}
         run: |
           curl -s -X POST "$AI_ENDPOINT" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.json
+            > ai_response.raw
 
           echo "Raw AI response:"
-          cat ai_response.json
+          cat ai_response.raw
 
-      # -----------------------------
-      # Build PR Comment
-      # -----------------------------
+      # -------------------------------------------------
+      # Build PR Comment (NULL-SAFE)
+      # -------------------------------------------------
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
-          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
+          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.raw)
+          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.raw)
+          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.raw)
+          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.raw)
 
           cat <<EOF > pr_comment.md
           ## 🤖 Autonomous Cloud Change Risk Investigator
@@ -171,9 +160,9 @@ jobs:
           *Generated automatically by the AI Risk Platform*
           EOF
 
-      # -----------------------------
+      # -------------------------------------------------
       # Post PR Comment
-      # -----------------------------
+      # -------------------------------------------------
       - name: Post AI Comment on PR
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
