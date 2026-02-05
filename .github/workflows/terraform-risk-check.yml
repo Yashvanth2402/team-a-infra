@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - main
+      - dev1
     paths:
       - "modules/**"
       - "environments/**"
@@ -45,7 +46,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # -----------------------------
-      # Terraform Init (Backend Auth Fix)
+      # Terraform Init (OIDC enforced)
       # -----------------------------
       - name: Terraform Init
         working-directory: environments/dev
@@ -59,7 +60,7 @@ jobs:
         run: terraform init -input=false
 
       # -----------------------------
-      # Terraform Plan
+      # Terraform Plan (OIDC enforced)
       # -----------------------------
       - name: Terraform Plan
         working-directory: environments/dev
@@ -75,17 +76,18 @@ jobs:
           terraform show -json tfplan > plan.json
 
       # -----------------------------
-      # Generate checksum
+      # Canonical checksum
       # -----------------------------
       - name: Generate checksum
         working-directory: environments/dev
         run: |
-          sha256sum plan.json | awk '{print $1}' > checksum.txt
+          jq -cS . plan.json > plan.canonical.json
+          sha256sum plan.canonical.json | awk '{print $1}' > checksum.txt
 
       # -----------------------------
-      # Build AI Payload
+      # Build AI payload
       # -----------------------------
-      - name: Build AI Risk Payload
+      - name: Build AI Payload
         working-directory: environments/dev
         run: |
           jq -n \
@@ -97,7 +99,7 @@ jobs:
             --arg env "dev" \
             --arg cloud "azure" \
             --arg region "eastus" \
-            --slurpfile plan plan.json \
+            --slurpfile plan plan.canonical.json \
             --rawfile checksum checksum.txt \
             '{
               metadata: {
@@ -118,23 +120,38 @@ jobs:
             }' > payload.json
 
       # -----------------------------
-      # Call AI Risk Engine
+      # Call AI Platform (GitHub OIDC)
       # -----------------------------
-      - name: Send to AI Risk Engine
+      - name: Call AI Platform
         working-directory: environments/dev
         env:
           AI_ENDPOINT: ${{ secrets.AI_RISK_ENDPOINT }}
-          API_KEY: ${{ secrets.AI_RISK_API_KEY }}
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
         run: |
-          AI_ENDPOINT_CLEAN="$(printf '%s' "$AI_ENDPOINT")"
+          echo "Requesting GitHub OIDC token..."
 
-          curl -s -X POST "$AI_ENDPOINT_CLEAN" \
+          ID_TOKEN=$(curl -s \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" \
+            | jq -r '.value')
+
+          if [ -z "$ID_TOKEN" ] || [ "$ID_TOKEN" = "null" ]; then
+            echo "❌ Failed to obtain OIDC token"
+            exit 1
+          fi
+
+          curl --fail --silent --show-error \
+            -X POST "$AI_ENDPOINT" \
+            -H "Authorization: Bearer $ID_TOKEN" \
             -H "Content-Type: application/json" \
-            -H "x-api-key: $API_KEY" \
             -d @payload.json \
-            > ai_response.json
+            -o ai_response.json
 
+          echo "Raw AI response:"
           cat ai_response.json
+
+          jq empty ai_response.json
 
       # -----------------------------
       # Build PR Comment
@@ -142,23 +159,30 @@ jobs:
       - name: Build PR Comment
         working-directory: environments/dev
         run: |
-          RISK_LEVEL=$(jq -r '.risk_level' ai_response.json)
-          DECISION=$(jq -r '.decision' ai_response.json)
-          CONFIDENCE=$(jq -r '.confidence // "N/A"' ai_response.json)
-          EXPLANATION=$(jq -r '.explanation' ai_response.json)
+          RISK_LEVEL=$(jq -r '.risk_level // "UNKNOWN"' ai_response.json)
+          DECISION=$(jq -r '.decision // "REQUIRE_REVIEW"' ai_response.json)
+          CONFIDENCE=$(jq -r '.confidence // "0.4"' ai_response.json)
+          EXPLANATION=$(jq -r '.explanation // "No explanation returned"' ai_response.json)
 
-          printf "## 🤖 Autonomous Cloud Change Risk Investigator\n\n" > pr_comment.md
-          printf "**Environment:** dev\n" >> pr_comment.md
-          printf "**Risk Level:** %s\n" "$RISK_LEVEL" >> pr_comment.md
-          printf "**Decision:** %s\n" "$DECISION" >> pr_comment.md
-          printf "**Confidence:** %s\n\n" "$CONFIDENCE" >> pr_comment.md
-          printf "### 🧠 AI Explanation\n%s\n\n" "$EXPLANATION" >> pr_comment.md
-          printf "---\n*Generated automatically by the AI Risk Platform*\n" >> pr_comment.md
+          cat <<EOF > pr_comment.md
+          ## 🤖 Autonomous Cloud Change Risk Investigator
+
+          **Environment:** dev  
+          **Risk Level:** $RISK_LEVEL  
+          **Decision:** $DECISION  
+          **Confidence:** $CONFIDENCE  
+
+          ### 🧠 AI Explanation
+          $EXPLANATION
+
+          ---
+          *Generated automatically by the AI Risk Platform*
+          EOF
 
       # -----------------------------
       # Post PR Comment
       # -----------------------------
-      - name: Post AI Comment on PR
+      - name: Post PR Comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
